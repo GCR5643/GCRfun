@@ -1,0 +1,27 @@
+# Secrets
+.env
+config/credentials.json
+config/token.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Output
+output/
+
+# OS
+.DS_Store
+Thumbs.db

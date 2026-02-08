@@ -1,0 +1,52 @@
+# ============================================================
+# Email Task Automation — 설정 파일
+# 이 파일을 config/settings.yaml 로 복사한 뒤 수정하세요.
+# ============================================================
+
+# 이메일 조회 설정
+email:
+  max_results: 100              # 1회 실행 시 최대 조회 메일 수
+  lookback_days: 30             # 최근 N일 내 메일만 대상
+  my_email: "you@company.com"   # 내 회사 이메일 주소
+
+# 미답변 판정
+unanswered:
+  working_days_threshold: 4     # N 영업일 이상 미답변 시 투두 대상
+  include_korean_holidays: false
+
+# 캘린더 투두
+calendar:
+  calendar_id: "primary"        # 회사 기본 캘린더 사용 시 "primary"
+  max_todos_per_run: 10         # 1회 실행당 최대 투두 생성 수
+  todo_prefix: "[메일투두]"      # 캘린더 이벤트 제목 접두사
+  default_duration_minutes: 30  # 투두 이벤트 기본 길이 (분)
+
+# 재연락(Re-engage) 판정
+reengage:
+  stale_days: 14                # N일 이상 대화 멈춤 → 재연락 대상
+  min_thread_length: 2          # 최소 메일 주고받은 횟수
+  output_format: "markdown"     # markdown | json | csv
+
+# 우선순위 가중치 (합계 = 1.0)
+priority:
+  recency_weight: 0.4           # 최신 메일일수록 높은 점수
+  customer_weight: 0.3          # 고객 발신 여부
+  request_type_weight: 0.2      # 질문/일정요청 유형
+  thread_depth_weight: 0.1      # 스레드 깊이
+
+# 고객 도메인 목록 (이 도메인에서 온 메일 = 고객)
+customer_domains:
+  - "client-example.com"
+  - "customer-example.co.kr"
+  # 여기에 실제 고객사 도메인을 추가하세요
+
+# Claude API 설정
+llm:
+  model: "claude-sonnet-4-5-20250929"
+  max_tokens: 300
+  batch_size: 5                 # 한 번에 분류할 메일 수
+
+# 실행 모드
+execution:
+  dry_run: true                 # true → 실제 변경 없이 미리보기만
+  verbose: true                 # 상세 로그 출력

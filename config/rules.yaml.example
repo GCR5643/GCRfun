@@ -1,0 +1,53 @@
+# ============================================================
+# 자동 읽음 처리 규칙 (Auto-Read Rules)
+#
+# - LLM이 생성한 규칙은 source: llm_generated
+# - 사용자가 직접 추가한 규칙은 source: manual
+# - enabled: false 로 비활성화 가능
+# - match_count: 이 규칙이 몇 번 적용되었는지 자동 추적
+# ============================================================
+
+rules:
+  - id: rule_001
+    name: "프로모션 뉴스레터"
+    created_at: "2026-02-08"
+    source: "llm_generated"
+    enabled: true
+    conditions:
+      sender_pattern: ".*@(marketing|promo|newsletter)\\..*"
+      subject_contains: ["할인", "프로모션", "뉴스레터", "구독", "sale", "offer"]
+      has_unsubscribe_header: true
+    action: "mark_read"
+    match_count: 0
+
+  - id: rule_002
+    name: "GitHub 알림"
+    created_at: "2026-02-08"
+    source: "llm_generated"
+    enabled: true
+    conditions:
+      sender_pattern: "notifications@github\\.com"
+    action: "mark_read"
+    match_count: 0
+
+  - id: rule_003
+    name: "Jira 자동 알림"
+    created_at: "2026-02-08"
+    source: "llm_generated"
+    enabled: true
+    conditions:
+      sender_pattern: "jira@.*\\.atlassian\\.net"
+    action: "mark_read"
+    match_count: 0
+
+# 새 규칙 추가 예시:
+#  - id: rule_004
+#    name: "내부 CI/CD 알림"
+#    created_at: "2026-02-10"
+#    source: "manual"
+#    enabled: true
+#    conditions:
+#      sender_pattern: "ci@company\\.com"
+#      subject_contains: ["build", "deploy", "pipeline"]
+#    action: "mark_read"
+#    match_count: 0
