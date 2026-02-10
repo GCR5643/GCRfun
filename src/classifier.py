@@ -7,63 +7,42 @@ JUNK 판정 시 자동 규칙을 제안합니다.
 import json
 import os
 from dataclasses import dataclass
-from typing import Optional
 
 import anthropic
 
 from src.fetcher import EmailMessage
 
-CLASSIFICATION_PROMPT = """당신은 이메일 분류 전문가입니다. 아래 이메일을 분석하여 JSON으로 분류하세요.
+BATCH_PROMPT_HEADER = """이메일 {count}개를 분류하세요. JSON 배열만 반환.
 
-분류 기준:
-- JUNK: 프로모션, 뉴스레터, 자동알림(GitHub/Jira/CI 등), 답장 불필요한 메일
-- NEEDS_REPLY: 나에게 직접 질문하거나 일정/미팅을 요청한 메일로, 아직 답장하지 않은 것
-- STALE: 업무/영업 관련 스레드에서 대화가 진행되다 멈춘 것 (14일 이상 무응답)
-- NORMAL: 위 어디에도 해당하지 않는 일반 메일 (조치 불필요)
+분류:
+- JUNK: 프로모션, 뉴스레터, 자동알림, 답장 불필요
+- NEEDS_REPLY: 나에게 직접 질문 또는 일정/미팅 요청, 미답장
+- STALE: 업무/영업 스레드가 14일+ 무응답
+- NORMAL: 조치 불필요
 
-이메일 정보:
-- From: {sender}
-- To: {recipients}
-- Subject: {subject}
-- Date: {date}
-- Labels: {labels}
-- Thread length: {thread_length}
-- My last reply in thread: {my_last_reply}
-- Body (첫 500자): {body_preview}
+형식:
+{{"message_id": "ID", "classification": "JUNK|NEEDS_REPLY|STALE|NORMAL", "confidence": 0.0-1.0, "reason": "1줄", "is_customer": bool, "has_direct_question": bool, "has_schedule_request": bool}}
 
-JSON 응답만 반환하세요:
-{{
-  "classification": "JUNK|NEEDS_REPLY|STALE|NORMAL",
-  "confidence": 0.0-1.0,
-  "reason": "판정 근거 1줄",
-  "is_customer": true/false,
-  "has_direct_question": true/false,
-  "has_schedule_request": true/false,
-  "suggested_rule": null 또는 {{"sender_pattern": "...", "subject_contains": [...]}}
-}}"""
+JSON 배열만:
 
-BATCH_PROMPT_HEADER = """당신은 이메일 분류 전문가입니다. 아래 이메일 {count}개를 각각 분석하여 JSON 배열로 분류하세요.
+"""
 
-분류 기준:
-- JUNK: 프로모션, 뉴스레터, 자동알림(GitHub/Jira/CI 등), 답장 불필요한 메일
-- NEEDS_REPLY: 나에게 직접 질문하거나 일정/미팅을 요청한 메일로, 아직 답장하지 않은 것
-- STALE: 업무/영업 관련 스레드에서 대화가 진행되다 멈춘 것 (14일 이상 무응답)
-- NORMAL: 위 어디에도 해당하지 않는 일반 메일 (조치 불필요)
+RULE_SUGGEST_PROMPT = """아래는 JUNK으로 분류된 이메일 발신자와 제목 목록입니다.
+이 메일들을 자동 필터링할 수 있는 간단한 규칙을 제안해주세요.
 
-각 이메일에 대해 다음 형식의 JSON 객체를 반환하세요:
-{{
-  "message_id": "메일ID",
-  "classification": "JUNK|NEEDS_REPLY|STALE|NORMAL",
-  "confidence": 0.0-1.0,
-  "reason": "판정 근거 1줄",
-  "is_customer": true/false,
-  "has_direct_question": true/false,
-  "has_schedule_request": true/false,
-  "suggested_rule": null 또는 {{"sender_pattern": "...", "subject_contains": [...]}}
-}}
+규칙은 2가지 필드로만 구성됩니다:
+- sender: 발신자 주소에 포함된 문자열 (예: "@github.com", "noreply@")
+- keywords: 제목에 포함된 키워드 리스트 (선택사항)
 
-JSON 배열만 반환하세요. 설명이나 마크다운 없이 순수 JSON만:
+비슷한 메일은 하나의 규칙으로 통합하세요. 최대 {max_rules}개.
+JSON 배열만 반환하세요:
 
+[{{"sender": "@example.com"}}, {{"sender": "noreply@", "keywords": ["알림"]}}]
+
+JUNK 메일 목록:
+{junk_list}
+
+JSON 배열만:
 """
 
 
@@ -78,7 +57,6 @@ class ClassificationResult:
     is_customer: bool
     has_direct_question: bool
     has_schedule_request: bool
-    suggested_rule: Optional[dict]
 
 
 def _format_email_for_prompt(msg: EmailMessage) -> str:
@@ -111,7 +89,6 @@ def _parse_classification(data: dict) -> ClassificationResult:
         is_customer=bool(data.get("is_customer", False)),
         has_direct_question=bool(data.get("has_direct_question", False)),
         has_schedule_request=bool(data.get("has_schedule_request", False)),
-        suggested_rule=data.get("suggested_rule"),
     )
 
 
@@ -166,34 +143,35 @@ def classify_batch(
     return results
 
 
-def classify_single(
-    message: EmailMessage,
+def suggest_rules(
+    junk_messages: list[EmailMessage],
     model: str = "claude-sonnet-4-5-20250929",
-    max_tokens: int = 300,
-) -> ClassificationResult:
-    """단일 메일을 Claude에 분류 요청."""
+    max_rules: int = 5,
+) -> list[dict]:
+    """JUNK 메일 목록을 보고 통합된 필터 규칙을 제안 (1회 호출).
+
+    Args:
+        junk_messages: JUNK으로 분류된 메일 리스트
+        model: Claude 모델 ID
+        max_rules: 최대 제안 규칙 수
+
+    Returns:
+        [{"sender": "...", "keywords": [...]}] 형태의 규칙 리스트
+    """
+    if not junk_messages:
+        return []
+
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-    my_reply = (
-        message.my_last_reply_date.strftime("%Y-%m-%d %H:%M")
-        if message.my_last_reply_date
-        else "없음"
+    junk_list = "\n".join(
+        f"- From: {m.sender} | Subject: {m.subject}" for m in junk_messages
     )
 
-    prompt = CLASSIFICATION_PROMPT.format(
-        sender=message.sender,
-        recipients=", ".join(message.recipients),
-        subject=message.subject,
-        date=message.date.strftime("%Y-%m-%d %H:%M"),
-        labels=", ".join(message.labels),
-        thread_length=message.thread_length,
-        my_last_reply=my_reply,
-        body_preview=message.body_preview,
-    )
+    prompt = RULE_SUGGEST_PROMPT.format(max_rules=max_rules, junk_list=junk_list)
 
     response = client.messages.create(
         model=model,
-        max_tokens=max_tokens,
+        max_tokens=512,
         messages=[{"role": "user", "content": prompt}],
     )
 
@@ -202,6 +180,8 @@ def classify_single(
         lines = response_text.split("\n")
         response_text = "\n".join(lines[1:-1])
 
-    data = json.loads(response_text)
-    data["message_id"] = message.message_id
-    return _parse_classification(data)
+    parsed = json.loads(response_text)
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+
+    return parsed

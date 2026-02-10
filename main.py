@@ -15,8 +15,8 @@ import yaml
 
 from src.auth import get_gmail_service, get_calendar_service, get_credentials
 from src.fetcher import fetch_messages
-from src.rules_engine import load_rules, save_rules, apply_rules, get_stats, disable_rule
-from src.classifier import classify_batch, ClassificationResult
+from src.rules_engine import load_rules, save_rules, apply_rules, merge_rules, get_stats, disable_rule
+from src.classifier import classify_batch, suggest_rules, ClassificationResult
 from src.prioritizer import prioritize
 from src.calendar_client import create_todos
 from src.actions import mark_as_read, generate_reengage_report
@@ -137,18 +137,22 @@ def run(dry_run, verbose):
         )
         all_classifications.extend(results)
 
-        # 새 규칙 학습: JUNK 판정 메일의 suggested_rule 추가
-        for result in results:
-            if result.classification == "JUNK" and result.suggested_rule:
-                from src.rules_engine import add_rule
-
-                new_rule = add_rule(
-                    rules,
-                    name=f"자동학습: {result.reason[:30]}",
-                    conditions=result.suggested_rule,
-                )
-                if verbose:
-                    click.echo(f"       → 새 규칙 추가: {new_rule['name']}")
+    # 규칙 학습: JUNK 메일을 모아서 한 번에 통합 규칙 제안
+    junk_from_llm = [
+        msg for msg in remaining
+        for cls in all_classifications
+        if cls.message_id == msg.message_id and cls.classification == "JUNK"
+    ]
+    if junk_from_llm:
+        click.echo(f"       → JUNK {len(junk_from_llm)}건에서 규칙 학습 중...")
+        suggested = suggest_rules(
+            junk_from_llm,
+            model=llm_config.get("model", "claude-sonnet-4-5-20250929"),
+        )
+        added = merge_rules(rules, suggested)
+        if added and verbose:
+            for r in added:
+                click.echo(f"       → 새 규칙: {r.get('sender', '')} {r.get('keywords', '')}")
 
     save_rules(rules)
 
@@ -244,30 +248,32 @@ def rules_list():
         return
 
     click.echo(f"총 {len(all_rules)}개 규칙:\n")
-    for r in all_rules:
-        status = "활성" if r.get("enabled", True) else "비활성"
-        click.echo(
-            f"  [{r['id']}] {r['name']} ({status}, 출처: {r.get('source', '?')}, "
-            f"매칭: {r.get('match_count', 0)}회)"
-        )
-        conditions = r.get("conditions", {})
-        if conditions.get("sender_pattern"):
-            click.echo(f"    → 발신자: {conditions['sender_pattern']}")
-        if conditions.get("subject_contains"):
-            click.echo(f"    → 제목 포함: {conditions['subject_contains']}")
+    for i, r in enumerate(all_rules):
+        status = "ON" if r.get("enabled", True) else "OFF"
+        sender = r.get("sender", "")
+        keywords = r.get("keywords", [])
+        hits = r.get("hits", 0)
+        source = r.get("source", "manual")
+
+        parts = [f"  [{i}] {status}"]
+        if sender:
+            parts.append(f"sender={sender}")
+        if keywords:
+            parts.append(f"keywords={keywords}")
+        parts.append(f"(매칭:{hits}, {source})")
+        click.echo(" ".join(parts))
 
 
 @rules.command("disable")
-@click.argument("rule_id")
-def rules_disable(rule_id):
-    """규칙을 비활성화합니다."""
+@click.argument("index", type=int)
+def rules_disable(index):
+    """규칙을 비활성화합니다 (번호로 지정)."""
     all_rules = load_rules()
-    result = disable_rule(all_rules, rule_id)
-    if result:
+    if disable_rule(all_rules, index):
         save_rules(all_rules)
-        click.echo(f"규칙 비활성화됨: {result['name']} ({rule_id})")
+        click.echo(f"규칙 #{index} 비활성화됨")
     else:
-        click.echo(f"규칙을 찾을 수 없습니다: {rule_id}")
+        click.echo(f"유효하지 않은 번호: {index} (총 {len(all_rules)}개)")
 
 
 @rules.command("stats")
@@ -279,13 +285,14 @@ def rules_stats():
         click.echo("등록된 규칙이 없습니다.")
         return
 
-    click.echo(f"{'ID':<20} {'이름':<30} {'매칭':<8} {'상태':<8} {'출처'}")
+    click.echo(f"{'#':<4} {'발신자':<30} {'키워드':<25} {'매칭':<6} {'상태':<5} {'출처'}")
     click.echo("-" * 80)
-    for s in sorted(stats, key=lambda x: x["match_count"], reverse=True):
-        status = "활성" if s["enabled"] else "비활성"
+    for s in sorted(stats, key=lambda x: x["hits"], reverse=True):
+        status = "ON" if s["enabled"] else "OFF"
+        kw = ", ".join(s["keywords"][:3]) if s["keywords"] else "-"
         click.echo(
-            f"{s['id']:<20} {s['name']:<30} {s['match_count']:<8} "
-            f"{status:<8} {s['source']}"
+            f"{s['index']:<4} {s['sender']:<30} {kw:<25} "
+            f"{s['hits']:<6} {status:<5} {s['source']}"
         )
 
 
