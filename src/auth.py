@@ -17,13 +17,14 @@ from googleapiclient.discovery import build
 
 load_dotenv()
 
-# Gmail 수정+작성 + Tasks + Calendar 읽기/쓰기 권한
+# Gmail 수정+작성 + Tasks + Calendar 읽기/쓰기 + Docs 쓰기 권한
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.compose",
     "https://www.googleapis.com/auth/tasks",
     "https://www.googleapis.com/auth/calendar.readonly",
     "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/documents",
 ]
 
 
@@ -71,3 +72,8 @@ def get_tasks_service():
 def get_calendar_service():
     """Google Calendar API 서비스 객체를 반환합니다."""
     return build("calendar", "v3", credentials=get_credentials())
+
+
+def get_docs_service():
+    """Google Docs API 서비스 객체를 반환합니다 (실행 로그 기록용)."""
+    return build("docs", "v1", credentials=get_credentials())
