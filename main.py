@@ -13,7 +13,7 @@
 import click
 import yaml
 
-from src.auth import get_gmail_service, get_calendar_service, get_credentials
+from src.auth import get_gmail_service, get_tasks_service, get_credentials
 from src.fetcher import fetch_messages
 from src.rules_engine import load_rules, save_rules, apply_rules, merge_rules, get_stats, disable_rule
 from src.classifier import classify_batch, suggest_rules, ClassificationResult
@@ -120,7 +120,6 @@ def run(dry_run, verbose):
                 is_customer=False,
                 has_direct_question=False,
                 has_schedule_request=False,
-                suggested_rule=None,
             )
         )
 
@@ -162,8 +161,8 @@ def run(dry_run, verbose):
         counts[cls.classification] = counts.get(cls.classification, 0) + 1
     click.echo(f"       → 분류 결과: {counts}")
 
-    # 5. 미답변 메일 우선순위화 + 캘린더 투두
-    click.echo("[5/6] 미답변 메일 우선순위화 및 캘린더 투두 생성...")
+    # 5. 미답변 메일 우선순위화 + Google Tasks 투두
+    click.echo("[5/6] 미답변 메일 우선순위화 및 Tasks 투두 생성...")
     cal_config = settings.get("calendar", {})
     priority_config = settings.get("priority", {})
     customer_domains = settings.get("customer_domains", [])
@@ -187,16 +186,14 @@ def run(dry_run, verbose):
                 )
             click.echo()
 
-        calendar = get_calendar_service()
-        events = create_todos(
-            calendar,
+        tasks = get_tasks_service()
+        created = create_todos(
+            tasks,
             prioritized,
-            calendar_id=cal_config.get("calendar_id", "primary"),
             todo_prefix=cal_config.get("todo_prefix", "[메일투두]"),
-            duration_minutes=cal_config.get("default_duration_minutes", 30),
             dry_run=dry_run,
         )
-        click.echo(f"       → 캘린더 투두: {len(events)}건 {'(미리보기)' if dry_run else '생성됨'}")
+        click.echo(f"       → Tasks 투두: {len(created)}건 {'(미리보기)' if dry_run else '생성됨'}")
     else:
         click.echo("       → 미답변 메일 없음")
 

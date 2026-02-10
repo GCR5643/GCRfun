@@ -1,7 +1,7 @@
 """
 Google OAuth2 인증 모듈
 
-Gmail API + Google Calendar API에 접근하기 위한 OAuth2 인증을 처리합니다.
+Gmail API + Google Tasks API에 접근하기 위한 OAuth2 인증을 처리합니다.
 최초 실행 시 브라우저를 통해 Google 계정 로그인 후 권한을 승인하면
 token.json이 생성되어 이후에는 자동으로 인증됩니다.
 """
@@ -17,10 +17,10 @@ from googleapiclient.discovery import build
 
 load_dotenv()
 
-# Gmail 읽기/수정 + Calendar 읽기/쓰기 권한
+# Gmail 읽기/수정 + Tasks 읽기/쓰기 권한
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/tasks",
 ]
 
 
@@ -60,6 +60,6 @@ def get_gmail_service():
     return build("gmail", "v1", credentials=get_credentials())
 
 
-def get_calendar_service():
-    """Google Calendar API 서비스 객체를 반환합니다."""
-    return build("calendar", "v3", credentials=get_credentials())
+def get_tasks_service():
+    """Google Tasks API 서비스 객체를 반환합니다."""
+    return build("tasks", "v1", credentials=get_credentials())

@@ -14,12 +14,10 @@ unanswered:
   working_days_threshold: 4     # N 영업일 이상 미답변 시 투두 대상
   include_korean_holidays: false
 
-# 캘린더 투두
+# Google Tasks 투두 (캘린더에 체크리스트로 표시)
 calendar:
-  calendar_id: "primary"        # 회사 기본 캘린더 사용 시 "primary"
   max_todos_per_run: 10         # 1회 실행당 최대 투두 생성 수
-  todo_prefix: "[메일투두]"      # 캘린더 이벤트 제목 접두사
-  default_duration_minutes: 30  # 투두 이벤트 기본 길이 (분)
+  todo_prefix: "[메일투두]"      # 태스크 제목 접두사
 
 # 재연락(Re-engage) 판정
 reengage:
