@@ -16,43 +16,24 @@ from typing import Optional
 
 import anthropic
 
+from src.cost_tracker import record_usage
 from src.fetcher import EmailMessage
 
-BATCH_PROMPT_HEADER = """이메일 {count}개를 분류하세요. JSON 배열만 반환.
+BATCH_PROMPT_HEADER = """이메일 {count}개 분류. JSON 배열만 반환.
 
-분류:
-- JUNK: 프로모션, 뉴스레터, 자동알림, 답장 불필요
-- NEEDS_REPLY: 나에게 직접 질문 또는 일정/미팅 요청, 미답장
-- STALE: 업무/영업 스레드가 14일+ 무응답
-- NORMAL: 조치 불필요
+분류: JUNK(프로모/뉴스레터/자동알림) | NEEDS_REPLY(질문·일정요청 미답) | STALE(14일+ 무응답) | NORMAL.
+NEEDS_REPLY일 때 reply_type: DECISION|SIMPLE_REPLY|SCHEDULE|INFO_SHARE|DELEGATE.
 
-NEEDS_REPLY인 경우 reply_type도 판정:
-- DECISION: 내 판단/의사결정이 필요한 요청 (제안 수락, 가격 협상, 방향 결정 등)
-- SIMPLE_REPLY: 단순 답장 (일정 컨펌, 감사 인사, 수신 확인 등)
-- SCHEDULE: 미팅/일정을 잡아야 하는 요청
-- INFO_SHARE: 자료/파일을 보내야 하는 요청
-- DELEGATE: 내가 아닌 다른 팀원이 답해야 하는 건
-
-형식:
-{{"message_id": "ID", "classification": "JUNK|NEEDS_REPLY|STALE|NORMAL", "reply_type": "DECISION|SIMPLE_REPLY|SCHEDULE|INFO_SHARE|DELEGATE|null", "confidence": 0.0-1.0, "reason": "1줄", "is_customer": bool, "has_direct_question": bool, "has_schedule_request": bool, "decision_options": ["옵션A", "옵션B", "옵션C"] 또는 null, "suggested_file": "파일명" 또는 null, "proposed_time": "상대가 제안한 시간" 또는 null}}
+각 항목: message_id, classification, reply_type(null가능), confidence, reason, is_customer, has_direct_question, has_schedule_request, decision_options(배열|null), suggested_file(null), proposed_time(null).
 
 JSON 배열만:
-
 """
 
-RULE_SUGGEST_PROMPT = """아래는 JUNK으로 분류된 이메일 발신자와 제목 목록입니다.
-이 메일들을 자동 필터링할 수 있는 간단한 규칙을 제안해주세요.
+RULE_SUGGEST_PROMPT = """JUNK 메일 목록입니다. 자동 필터 규칙을 제안하세요.
+규칙: sender(발신자 포함 문자열), keywords(제목 키워드 배열, 선택). 비슷한 건 통합. 최대 {max_rules}개.
+JSON 배열만: [{{"sender": "@example.com"}}, {{"sender": "noreply@", "keywords": ["알림"]}}]
 
-규칙은 2가지 필드로만 구성됩니다:
-- sender: 발신자 주소에 포함된 문자열 (예: "@github.com", "noreply@")
-- keywords: 제목에 포함된 키워드 리스트 (선택사항)
-
-비슷한 메일은 하나의 규칙으로 통합하세요. 최대 {max_rules}개.
-JSON 배열만 반환하세요:
-
-[{{"sender": "@example.com"}}, {{"sender": "noreply@", "keywords": ["알림"]}}]
-
-JUNK 메일 목록:
+JUNK 목록:
 {junk_list}
 
 JSON 배열만:
@@ -77,7 +58,7 @@ class ClassificationResult:
 
 
 def _format_email_for_prompt(msg: EmailMessage) -> str:
-    """메일을 프롬프트에 삽입할 텍스트로 포맷."""
+    """메일을 프롬프트에 삽입할 텍스트로 포맷 (Labels 생략으로 토큰 절감)."""
     my_reply = (
         msg.my_last_reply_date.strftime("%Y-%m-%d %H:%M")
         if msg.my_last_reply_date
@@ -86,12 +67,9 @@ def _format_email_for_prompt(msg: EmailMessage) -> str:
     return (
         f"[Message ID: {msg.message_id}]\n"
         f"- From: {msg.sender}\n"
-        f"- To: {', '.join(msg.recipients)}\n"
         f"- Subject: {msg.subject}\n"
         f"- Date: {msg.date.strftime('%Y-%m-%d %H:%M')}\n"
-        f"- Labels: {', '.join(msg.labels)}\n"
-        f"- Thread length: {msg.thread_length}\n"
-        f"- My last reply: {my_reply}\n"
+        f"- Thread: {msg.thread_length}, My last reply: {my_reply}\n"
         f"- Body: {msg.body_preview}\n"
     )
 
@@ -142,6 +120,15 @@ def classify_batch(
         max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],
     )
+
+    usage = getattr(response, "usage", None)
+    if usage is not None:
+        record_usage(
+            model=model,
+            input_tokens=getattr(usage, "input_tokens", 0) or 0,
+            output_tokens=getattr(usage, "output_tokens", 0) or 0,
+            operation="classify",
+        )
 
     response_text = response.content[0].text.strip()
 
@@ -195,6 +182,15 @@ def suggest_rules(
         max_tokens=512,
         messages=[{"role": "user", "content": prompt}],
     )
+
+    usage = getattr(response, "usage", None)
+    if usage is not None:
+        record_usage(
+            model=model,
+            input_tokens=getattr(usage, "input_tokens", 0) or 0,
+            output_tokens=getattr(usage, "output_tokens", 0) or 0,
+            operation="rule_learn",
+        )
 
     response_text = response.content[0].text.strip()
     if response_text.startswith("```"):

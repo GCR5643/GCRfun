@@ -14,6 +14,7 @@ from email.mime.text import MIMEText
 import anthropic
 
 from src.classifier import ClassificationResult
+from src.cost_tracker import record_usage
 from src.fetcher import EmailMessage
 
 # reply_type별 한국어 라벨
@@ -96,10 +97,12 @@ def _build_draft_prompt(
     if cls.reply_type == "DECISION" and cls.decision_options:
         extra_inst = f"- 선택한 의사결정: '{cls.decision_options[0]}' 기반으로 작성"
 
+    # 드래프트용 본문은 300자로 제한 (토큰 절감)
+    body_preview = (msg.body_preview or "")[:300]
     return DRAFT_PROMPT.format(
         sender=msg.sender,
         subject=msg.subject,
-        body_preview=msg.body_preview,
+        body_preview=body_preview,
         reply_type_label=reply_label,
         context="\n".join(context_parts),
         extra_instructions=extra_inst,
@@ -132,6 +135,15 @@ def generate_draft_text(
         max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],
     )
+
+    usage = getattr(response, "usage", None)
+    if usage is not None:
+        record_usage(
+            model=model,
+            input_tokens=getattr(usage, "input_tokens", 0) or 0,
+            output_tokens=getattr(usage, "output_tokens", 0) or 0,
+            operation="draft",
+        )
 
     return response.content[0].text.strip()
 

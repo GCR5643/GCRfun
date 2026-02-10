@@ -56,3 +56,8 @@ llm:
 execution:
   dry_run: true                 # true → 실제 변경 없이 미리보기만
   verbose: true                 # 상세 로그 출력
+
+# Google Docs 실행 로그 (cron 등 자동 실행 시 로그 적재)
+docs_log:
+  enabled: false                # true → run 완료 시 아래 문서 끝에 로그 append
+  document_id: ""               # 문서 ID (URL의 /d/ 여기부분 /edit 에서 복사)

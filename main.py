@@ -17,6 +17,7 @@ from src.auth import (
     get_gmail_service,
     get_tasks_service,
     get_calendar_service,
+    get_docs_service,
     get_credentials,
 )
 from src.fetcher import fetch_messages
@@ -29,6 +30,7 @@ from src.draft_composer import compose_and_save_drafts
 from src.calendar_client import create_todos, insert_urgent_schedule
 from src.actions import mark_as_read, generate_reengage_report
 from src.cost_tracker import get_summary
+from src.docs_logger import append_run_log, format_run_summary
 
 REPLY_TYPE_LABELS = {
     "DECISION": "[판단]",
@@ -49,6 +51,48 @@ def _load_settings() -> dict:
             "config/settings.yaml.example을 복사해서 사용하세요."
         )
         raise click.Abort()
+
+
+def _write_docs_log_if_enabled(
+    settings: dict,
+    dry_run: bool,
+    messages_count: int,
+    rule_matched: int,
+    remaining: int,
+    classification_counts: dict,
+    prioritized_count: int,
+    draft_count: int,
+    todos_count: int,
+    read_count: int,
+    reengage_path: str = "",
+    cost_summary: str = "",
+) -> None:
+    """docs_log 설정이 켜져 있으면 Google Docs 문서 끝에 실행 로그를 append 합니다."""
+    docs_cfg = settings.get("docs_log", {}) or {}
+    if not docs_cfg.get("enabled"):
+        return
+    doc_id = (docs_cfg.get("document_id") or "").strip()
+    if not doc_id:
+        return
+    log_text = format_run_summary(
+        dry_run=dry_run,
+        messages_count=messages_count,
+        rule_matched=rule_matched,
+        remaining=remaining,
+        classification_counts=classification_counts,
+        prioritized_count=prioritized_count,
+        draft_count=draft_count,
+        todos_count=todos_count,
+        read_count=read_count,
+        reengage_path=reengage_path,
+        cost_summary=cost_summary,
+    )
+    try:
+        docs = get_docs_service()
+        if append_run_log(docs, doc_id, log_text):
+            click.echo("       → 실행 로그를 Google Docs에 기록했습니다.")
+    except Exception as e:
+        click.echo(f"       → Google Docs 로그 기록 실패: {e}")
 
 
 @click.group()
@@ -109,6 +153,20 @@ def run(dry_run, verbose):
 
     if not messages:
         click.echo("처리할 메일이 없습니다.")
+        _write_docs_log_if_enabled(
+            settings=settings,
+            dry_run=dry_run,
+            messages_count=0,
+            rule_matched=0,
+            remaining=0,
+            classification_counts={},
+            prioritized_count=0,
+            draft_count=0,
+            todos_count=0,
+            read_count=0,
+            reengage_path="",
+            cost_summary="",
+        )
         return
 
     # ── 3. 규칙 엔진 1차 필터링 ──
@@ -179,7 +237,7 @@ def run(dry_run, verbose):
     customer_domains = settings.get("customer_domains", [])
 
     prioritized = prioritize(
-        messages=messages + remaining,
+        messages=messages,
         classifications=all_classifications,
         customer_domains=customer_domains,
         weights=priority_config if priority_config else None,
@@ -227,6 +285,7 @@ def run(dry_run, verbose):
 
     # ── 7. Tasks 투두 + 긴급 캘린더 스케줄 ──
     click.echo("[7/8] Tasks 투두 등록 및 긴급 스케줄 확인...")
+    created_tasks = []
 
     if prioritized:
         # Tasks 투두 생성 (reply_type별 요약 불릿 포함)
@@ -288,8 +347,27 @@ def run(dry_run, verbose):
     # 비용 요약
     click.echo("\n=== 완료 ===")
     summary = get_summary()
+    cost_str = ""
     if summary["total_calls"] > 0:
-        click.echo(f"누적 API 비용: ${summary['total_cost_usd']:.4f}")
+        cost_str = f"누적 API 비용: ${summary['total_cost_usd']:.4f}"
+        click.echo(cost_str)
+
+    # Google Docs 실행 로그 (설정 시)
+    draft_count = len(draft_results) if draft_results else 0
+    _write_docs_log_if_enabled(
+        settings=settings,
+        dry_run=dry_run,
+        messages_count=len(messages),
+        rule_matched=len(rule_matched),
+        remaining=len(remaining),
+        classification_counts=counts,
+        prioritized_count=len(prioritized) if prioritized else 0,
+        draft_count=draft_count,
+        todos_count=len(created_tasks),
+        read_count=unread_count,
+        reengage_path=report_path or "",
+        cost_summary=cost_str,
+    )
 
 
 # ── rules 서브커맨드 ──

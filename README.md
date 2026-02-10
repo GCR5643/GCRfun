@@ -19,7 +19,7 @@ pip install -r requirements.txt
 ### 1. Google Cloud 프로젝트 설정
 
 1. [Google Cloud Console](https://console.cloud.google.com/)에서 프로젝트 생성
-2. Gmail API, Google Calendar API 활성화
+2. **Gmail API**, **Google Calendar API**, **Google Docs API** 활성화
 3. OAuth 2.0 클라이언트 ID 생성 (데스크톱 앱)
 4. `credentials.json` 다운로드 → `config/` 폴더에 저장
 
@@ -59,6 +59,24 @@ python main.py rules stats             # 매칭 통계
 python main.py cost
 ```
 
+## 자동 실행 시 Google Docs 로그
+
+cron 등으로 `run`을 자동 실행할 때, 실행 결과를 **Google Docs** 한 문서에 계속 쌓이게 할 수 있습니다.
+
+1. [Google Docs](https://docs.google.com/)에서 새 문서를 하나 만듭니다 (제목 예: "Email Automation 실행 로그").
+2. URL에서 **문서 ID**를 복사합니다.  
+   `https://docs.google.com/document/d/여기가_문서_ID/edit` → `여기가_문서_ID` 부분만 복사.
+3. `config/settings.yaml`에 다음을 추가/수정합니다.
+
+```yaml
+docs_log:
+  enabled: true
+  document_id: "복사한_문서_ID"
+```
+
+4. **최초 1회**: 스코프가 추가되었으므로 `python main.py auth`를 다시 실행해 Docs 권한을 승인합니다.
+5. 이후 `python main.py run`이 실행될 때마다 해당 문서 **맨 끝**에 실행 시각과 요약(메일 건수, 분류 결과, 드래프트/투두 건수, 비용 등)이 자동으로 추가됩니다.
+
 ## 프로젝트 구조
 
 ```
@@ -75,7 +93,8 @@ python main.py cost
 │   ├── prioritizer.py       # 미답변 메일 우선순위
 │   ├── calendar_client.py   # Google Calendar 투두 생성
 │   ├── actions.py           # 읽음 처리, 리포트 생성
-│   └── cost_tracker.py      # API 비용 추적
+│   ├── cost_tracker.py      # API 비용 추적
+│   └── docs_logger.py       # Google Docs 실행 로그 기록
 └── output/                  # 리포트 출력 (gitignore)
 ```
 

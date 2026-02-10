@@ -43,7 +43,7 @@ def _extract_domain(email_addr: str) -> str:
 
 
 def _decode_body(payload: dict) -> str:
-    """메일 payload에서 텍스트 본문을 디코딩하여 반환 (최대 500자)."""
+    """메일 payload에서 텍스트 본문을 디코딩하여 반환 (최대 350자, 토큰 절감)."""
     body_text = ""
 
     if payload.get("body", {}).get("data"):
@@ -63,7 +63,7 @@ def _decode_body(payload: dict) -> str:
                 if body_text:
                     break
 
-    return body_text[:500]
+    return body_text[:350]
 
 
 def _get_header(headers: list[dict], name: str) -> str:
