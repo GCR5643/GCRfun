@@ -19,6 +19,14 @@ calendar:
   max_todos_per_run: 10         # 1회 실행당 최대 투두 생성 수
   todo_prefix: "[메일투두]"      # 태스크 제목 접두사
 
+# 일정 조율 설정
+schedule:
+  work_start: 10                # 미팅 가능 시작 시간 (KST)
+  work_end: 18                  # 미팅 가능 종료 시간 (KST)
+  lunch_start: 12               # 점심 시작 (완전 제외)
+  lunch_end: 13                 # 점심 종료
+  meeting_minutes: 60           # 기본 미팅 길이 (분)
+
 # 재연락(Re-engage) 판정
 reengage:
   stale_days: 14                # N일 이상 대화 멈춤 → 재연락 대상

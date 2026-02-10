@@ -1,26 +1,32 @@
-"""Google Tasks 기반 투두 생성 모듈.
+"""Google Tasks + Calendar 이벤트 모듈.
 
-미답변 메일을 Google Tasks에 등록합니다.
-- 캘린더에 체크박스 형태로 표시됨
-- 완료 시 체크하여 관리 가능
-- 날짜별로 그룹화되어 일별 Task로 표시
-
-Google Tasks API를 사용하며, Calendar Events API와 달리
-체크리스트 형태의 할 일 관리를 지원합니다.
+1. Tasks: 미답변 메일을 reply_type별 요약 불릿으로 체크리스트 등록
+2. Calendar Event: 긴급 답신 시 30분 스케줄 블록 삽입
 """
 
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from src.classifier import ClassificationResult
 from src.prioritizer import PrioritizedEmail
 
 TRACKING_FILE = "output/task_tracking.json"
 TASKLIST_TITLE = "메일 투두"
 
+KST = timezone(timedelta(hours=9))
+
+# reply_type별 태스크 접두 이모지 대체 텍스트
+REPLY_TYPE_TAG = {
+    "DECISION": "[판단]",
+    "SIMPLE_REPLY": "[답장]",
+    "SCHEDULE": "[일정]",
+    "INFO_SHARE": "[자료]",
+    "DELEGATE": "[위임]",
+}
+
 
 def _load_tracking() -> set[str]:
-    """이미 등록된 message_id 집합을 로드."""
     p = Path(TRACKING_FILE)
     if not p.exists():
         return set()
@@ -29,27 +35,22 @@ def _load_tracking() -> set[str]:
 
 
 def _save_tracking(ids: set[str]) -> None:
-    """등록된 message_id 집합을 저장."""
     p = Path(TRACKING_FILE)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps({"registered_ids": sorted(ids)}, indent=2))
 
 
 def _get_or_create_tasklist(tasks_service, title: str = TASKLIST_TITLE) -> str:
-    """전용 태스크 리스트를 찾거나 새로 생성. tasklist ID를 반환."""
     result = tasks_service.tasklists().list(maxResults=100).execute()
     for tl in result.get("items", []):
         if tl["title"] == title:
             return tl["id"]
-
-    # 없으면 생성
     new_list = tasks_service.tasklists().insert(body={"title": title}).execute()
     return new_list["id"]
 
 
 def _next_workday() -> datetime:
-    """다음 영업일(월~금)을 반환."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(KST)
     target = now.replace(hour=9, minute=0, second=0, microsecond=0)
     if target <= now:
         target += timedelta(days=1)
@@ -58,31 +59,52 @@ def _next_workday() -> datetime:
     return target
 
 
-def _build_task(email: PrioritizedEmail, todo_prefix: str) -> dict:
-    """PrioritizedEmail을 Google Tasks 형식으로 변환."""
+def _build_task_with_summary(
+    email: PrioritizedEmail,
+    cls: ClassificationResult,
+    draft_info: dict | None,
+) -> dict:
+    """reply_type별 요약 불릿을 포함한 태스크를 생성."""
     msg = email.message
-    cls = email.classification
-
-    title = f"{todo_prefix} {msg.subject}"
+    tag = REPLY_TYPE_TAG.get(cls.reply_type or "", "")
+    title = f"{tag} {msg.subject}"
     if len(title) > 100:
         title = title[:97] + "..."
 
-    notes_lines = [
-        f"발신자: {msg.sender}",
-        f"수신일: {msg.date.strftime('%Y-%m-%d %H:%M')}",
-        f"우선순위: #{email.rank} (점수: {email.score})",
+    # 요약 불릿 포인트 구성
+    bullets = [
+        f"From: {msg.sender}",
+        f"수신: {msg.date.strftime('%m/%d %H:%M')}",
+        f"유형: {cls.reply_type or 'N/A'}",
         f"사유: {cls.reason}",
-        "",
-        msg.snippet,
-        "",
-        f"[message_id:{msg.message_id}]",
     ]
+
+    if cls.reply_type == "DECISION" and cls.decision_options:
+        bullets.append("")
+        bullets.append("의사결정 옵션:")
+        for i, opt in enumerate(cls.decision_options, 1):
+            bullets.append(f"  {i}. {opt}")
+
+    if cls.reply_type == "SCHEDULE" and draft_info and draft_info.get("schedule_info"):
+        bullets.append("")
+        bullets.append(draft_info["schedule_info"])
+
+    if cls.reply_type == "INFO_SHARE" and cls.suggested_file:
+        bullets.append("")
+        bullets.append(f"전달 파일: {cls.suggested_file}")
+
+    if draft_info and draft_info.get("status") == "created":
+        bullets.append("")
+        bullets.append("Gmail 드래프트 생성됨 - 확인 후 발송하세요")
+
+    bullets.append("")
+    bullets.append(msg.snippet)
 
     due = _next_workday()
 
     return {
         "title": title,
-        "notes": "\n".join(notes_lines),
+        "notes": "\n".join(bullets),
         "due": due.strftime("%Y-%m-%dT00:00:00.000Z"),
         "status": "needsAction",
     }
@@ -91,22 +113,29 @@ def _build_task(email: PrioritizedEmail, todo_prefix: str) -> dict:
 def create_todos(
     tasks_service,
     emails: list[PrioritizedEmail],
-    todo_prefix: str = "[메일투두]",
+    classifications: list[ClassificationResult],
+    draft_results: list[dict] | None = None,
     dry_run: bool = True,
 ) -> list[dict]:
-    """우선순위 메일을 Google Tasks 체크리스트로 등록.
+    """우선순위 메일을 reply_type 요약 포함 Tasks로 등록.
 
     Args:
-        tasks_service: 인증된 Google Tasks API 서비스 객체
-        emails: 우선순위 정렬된 메일 리스트
-        todo_prefix: 태스크 제목 접두사
-        dry_run: True면 실제 등록하지 않고 미리보기만
-
-    Returns:
-        생성된 태스크 리스트
+        tasks_service: Tasks API 서비스 객체
+        emails: 우선순위 메일 리스트
+        classifications: 분류 결과 (reply_type 포함)
+        draft_results: 드래프트 생성 결과 (있으면 연결)
+        dry_run: 미리보기 여부
     """
     tracking = _load_tracking()
-    created_tasks = []
+    cls_map = {c.message_id: c for c in classifications}
+    draft_map = {}
+    if draft_results:
+        for d in draft_results:
+            tid = d.get("thread_id")
+            if tid:
+                draft_map[tid] = d
+
+    created = []
 
     tasklist_id = None
     if not dry_run:
@@ -116,12 +145,20 @@ def create_todos(
         if email.message.message_id in tracking:
             continue
 
-        task = _build_task(email, todo_prefix)
+        cls = cls_map.get(email.message.message_id)
+        if not cls:
+            continue
+
+        draft_info = draft_map.get(email.message.thread_id)
+        task = _build_task_with_summary(email, cls, draft_info)
 
         if dry_run:
-            created_tasks.append(
-                {"status": "dry_run", "title": task["title"], "due": task["due"]}
-            )
+            created.append({
+                "status": "dry_run",
+                "title": task["title"],
+                "due": task["due"],
+                "reply_type": cls.reply_type,
+            })
         else:
             result = (
                 tasks_service.tasks()
@@ -129,16 +166,79 @@ def create_todos(
                 .execute()
             )
             tracking.add(email.message.message_id)
-            created_tasks.append(
-                {
-                    "status": "created",
-                    "title": task["title"],
-                    "due": task["due"],
-                    "task_id": result.get("id", ""),
-                }
-            )
+            created.append({
+                "status": "created",
+                "title": task["title"],
+                "due": task["due"],
+                "task_id": result.get("id", ""),
+                "reply_type": cls.reply_type,
+            })
 
     if not dry_run:
         _save_tracking(tracking)
 
-    return created_tasks
+    return created
+
+
+def insert_urgent_schedule(
+    calendar_service,
+    subject: str,
+    count: int = 1,
+    calendar_id: str = "primary",
+    dry_run: bool = True,
+) -> dict | None:
+    """긴급 답변이 필요한 경우 캘린더에 30분 스케줄 블록을 삽입.
+
+    Args:
+        calendar_service: Calendar API 서비스 객체
+        subject: 메일 건명
+        count: 긴급 건 수
+        calendar_id: 캘린더 ID
+        dry_run: 미리보기 여부
+
+    Returns:
+        생성된 이벤트 정보 또는 None
+    """
+    now = datetime.now(KST)
+    # 다음 정각 또는 30분 단위로
+    if now.minute < 30:
+        start = now.replace(minute=30, second=0, microsecond=0)
+    else:
+        start = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+
+    # 근무 시간 외면 다음 영업일 10시로
+    if start.hour >= 18 or start.hour < 10 or start.weekday() >= 5:
+        start = _next_workday().replace(hour=10, minute=0)
+
+    end = start + timedelta(minutes=30)
+
+    summary = f"메일답신 요망: \"{subject}\" 외 {count - 1}건" if count > 1 else f"메일답신 요망: \"{subject}\""
+
+    event = {
+        "summary": summary,
+        "start": {"dateTime": start.isoformat(), "timeZone": "Asia/Seoul"},
+        "end": {"dateTime": end.isoformat(), "timeZone": "Asia/Seoul"},
+        "reminders": {
+            "useDefault": False,
+            "overrides": [{"method": "popup", "minutes": 5}],
+        },
+        "colorId": "11",
+    }
+
+    if dry_run:
+        return {
+            "status": "dry_run",
+            "summary": summary,
+            "start": start.isoformat(),
+        }
+
+    result = (
+        calendar_service.events()
+        .insert(calendarId=calendar_id, body=event)
+        .execute()
+    )
+    return {
+        "status": "created",
+        "summary": summary,
+        "link": result.get("htmlLink", ""),
+    }

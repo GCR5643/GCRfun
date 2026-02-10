@@ -1,12 +1,18 @@
 """Claude API 기반 메일 분류 모듈.
 
-메일을 JUNK / NEEDS_REPLY / STALE / NORMAL 중 하나로 분류하고,
-JUNK 판정 시 자동 규칙을 제안합니다.
+1차: JUNK / NEEDS_REPLY / STALE / NORMAL 분류
+2차: NEEDS_REPLY에 대해 reply_type 서브 분류
+  - DECISION: 내 판단이 필요 (의사결정 옵션 3개 제시)
+  - SIMPLE_REPLY: 단순 답장 (컨펌, 감사 인사 등)
+  - SCHEDULE: 일정 잡기 (캘린더 확인 필요)
+  - INFO_SHARE: 정보/파일 전달 필요
+  - DELEGATE: 팀원에게 위임/전달
 """
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Optional
 
 import anthropic
 
@@ -20,8 +26,15 @@ BATCH_PROMPT_HEADER = """이메일 {count}개를 분류하세요. JSON 배열만
 - STALE: 업무/영업 스레드가 14일+ 무응답
 - NORMAL: 조치 불필요
 
+NEEDS_REPLY인 경우 reply_type도 판정:
+- DECISION: 내 판단/의사결정이 필요한 요청 (제안 수락, 가격 협상, 방향 결정 등)
+- SIMPLE_REPLY: 단순 답장 (일정 컨펌, 감사 인사, 수신 확인 등)
+- SCHEDULE: 미팅/일정을 잡아야 하는 요청
+- INFO_SHARE: 자료/파일을 보내야 하는 요청
+- DELEGATE: 내가 아닌 다른 팀원이 답해야 하는 건
+
 형식:
-{{"message_id": "ID", "classification": "JUNK|NEEDS_REPLY|STALE|NORMAL", "confidence": 0.0-1.0, "reason": "1줄", "is_customer": bool, "has_direct_question": bool, "has_schedule_request": bool}}
+{{"message_id": "ID", "classification": "JUNK|NEEDS_REPLY|STALE|NORMAL", "reply_type": "DECISION|SIMPLE_REPLY|SCHEDULE|INFO_SHARE|DELEGATE|null", "confidence": 0.0-1.0, "reason": "1줄", "is_customer": bool, "has_direct_question": bool, "has_schedule_request": bool, "decision_options": ["옵션A", "옵션B", "옵션C"] 또는 null, "suggested_file": "파일명" 또는 null, "proposed_time": "상대가 제안한 시간" 또는 null}}
 
 JSON 배열만:
 
@@ -57,6 +70,10 @@ class ClassificationResult:
     is_customer: bool
     has_direct_question: bool
     has_schedule_request: bool
+    reply_type: Optional[str] = None  # DECISION, SIMPLE_REPLY, SCHEDULE, INFO_SHARE, DELEGATE
+    decision_options: list[str] = field(default_factory=list)
+    suggested_file: Optional[str] = None
+    proposed_time: Optional[str] = None
 
 
 def _format_email_for_prompt(msg: EmailMessage) -> str:
@@ -89,6 +106,10 @@ def _parse_classification(data: dict) -> ClassificationResult:
         is_customer=bool(data.get("is_customer", False)),
         has_direct_question=bool(data.get("has_direct_question", False)),
         has_schedule_request=bool(data.get("has_schedule_request", False)),
+        reply_type=data.get("reply_type"),
+        decision_options=data.get("decision_options") or [],
+        suggested_file=data.get("suggested_file"),
+        proposed_time=data.get("proposed_time"),
     )
 
 

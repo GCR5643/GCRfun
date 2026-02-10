@@ -2,10 +2,10 @@
 
 사용법:
     python main.py auth          # OAuth 인증 (최초 1회)
-    python main.py run           # 메일 분류 + 액션 실행
+    python main.py run           # 메일 분류 + 드래프트 + 투두 실행
     python main.py run --dry-run # 미리보기만 (실제 변경 없음)
     python main.py rules list    # 규칙 목록 조회
-    python main.py rules disable <rule_id>  # 규칙 비활성화
+    python main.py rules disable <index>  # 규칙 비활성화
     python main.py rules stats   # 규칙 매칭 통계
     python main.py cost          # API 비용 요약
 """
@@ -13,18 +13,33 @@
 import click
 import yaml
 
-from src.auth import get_gmail_service, get_tasks_service, get_credentials
+from src.auth import (
+    get_gmail_service,
+    get_tasks_service,
+    get_calendar_service,
+    get_credentials,
+)
 from src.fetcher import fetch_messages
-from src.rules_engine import load_rules, save_rules, apply_rules, merge_rules, get_stats, disable_rule
+from src.rules_engine import (
+    load_rules, save_rules, apply_rules, merge_rules, get_stats, disable_rule,
+)
 from src.classifier import classify_batch, suggest_rules, ClassificationResult
 from src.prioritizer import prioritize
-from src.calendar_client import create_todos
+from src.draft_composer import compose_and_save_drafts
+from src.calendar_client import create_todos, insert_urgent_schedule
 from src.actions import mark_as_read, generate_reengage_report
-from src.cost_tracker import record_usage, get_summary
+from src.cost_tracker import get_summary
+
+REPLY_TYPE_LABELS = {
+    "DECISION": "[판단]",
+    "SIMPLE_REPLY": "[답장]",
+    "SCHEDULE": "[일정]",
+    "INFO_SHARE": "[자료]",
+    "DELEGATE": "[위임]",
+}
 
 
 def _load_settings() -> dict:
-    """settings.yaml 로드. 없으면 기본값 사용."""
     try:
         with open("config/settings.yaml") as f:
             return yaml.safe_load(f) or {}
@@ -38,7 +53,7 @@ def _load_settings() -> dict:
 
 @click.group()
 def cli():
-    """Email Task Automation — Gmail 메일 자동 분류 및 캘린더 투두 생성 도구."""
+    """Email Task Automation — Gmail 메일 자동 분류, 드래프트 생성, 캘린더 투두."""
     pass
 
 
@@ -49,20 +64,19 @@ def auth():
     click.echo("브라우저가 열리면 회사 Google 계정으로 로그인하세요.")
     try:
         creds = get_credentials()
-        click.echo(f"인증 성공! 토큰이 저장되었습니다.")
+        click.echo("인증 성공! 토큰이 저장되었습니다.")
     except FileNotFoundError as e:
         click.echo(f"오류: {e}")
         raise click.Abort()
 
 
 @cli.command()
-@click.option("--dry-run/--no-dry-run", default=None, help="미리보기 모드 (실제 변경 없음)")
-@click.option("--verbose/--quiet", default=None, help="상세 로그 출력")
+@click.option("--dry-run/--no-dry-run", default=None, help="미리보기 모드")
+@click.option("--verbose/--quiet", default=None, help="상세 로그")
 def run(dry_run, verbose):
-    """메일을 분류하고 액션을 실행합니다."""
+    """메일을 분류하고 드래프트 생성 + 투두 등록을 실행합니다."""
     settings = _load_settings()
 
-    # CLI 옵션이 없으면 settings.yaml 값 사용
     if dry_run is None:
         dry_run = settings.get("execution", {}).get("dry_run", True)
     if verbose is None:
@@ -71,18 +85,20 @@ def run(dry_run, verbose):
     if dry_run:
         click.echo("=== DRY RUN 모드 (실제 변경 없음) ===\n")
 
-    # 1. Gmail 서비스 초기화
-    click.echo("[1/6] Gmail 연결 중...")
+    # ── 1. 서비스 초기화 ──
+    click.echo("[1/8] 서비스 연결 중...")
     gmail = get_gmail_service()
+    tasks = get_tasks_service()
+    calendar = get_calendar_service()
 
-    # 2. 메일 조회
+    # ── 2. 메일 조회 ──
     email_config = settings.get("email", {})
     my_email = email_config.get("my_email", "")
     if not my_email:
         click.echo("오류: config/settings.yaml에 email.my_email을 설정하세요.")
         raise click.Abort()
 
-    click.echo(f"[2/6] 최근 {email_config.get('lookback_days', 30)}일 메일 조회 중...")
+    click.echo(f"[2/8] 최근 {email_config.get('lookback_days', 30)}일 메일 조회 중...")
     messages = fetch_messages(
         gmail,
         my_email=my_email,
@@ -95,21 +111,21 @@ def run(dry_run, verbose):
         click.echo("처리할 메일이 없습니다.")
         return
 
-    # 3. 규칙 엔진 1차 필터링
-    click.echo("[3/6] 규칙 기반 필터링 중...")
+    # ── 3. 규칙 엔진 1차 필터링 ──
+    click.echo("[3/8] 규칙 기반 필터링 중...")
     rules = load_rules()
     rule_matched, remaining = apply_rules(messages, rules)
-    save_rules(rules)  # match_count 업데이트
-    click.echo(f"       → 규칙 매칭: {len(rule_matched)}건 (JUNK), 남은 메일: {len(remaining)}건")
+    save_rules(rules)
+    click.echo(f"       → 규칙 매칭: {len(rule_matched)}건, 남은 메일: {len(remaining)}건")
 
-    # 4. Claude 분류
-    click.echo("[4/6] Claude AI 분류 중...")
+    # ── 4. Claude 분류 (reply_type 포함) ──
+    click.echo("[4/8] Claude AI 분류 중...")
     llm_config = settings.get("llm", {})
     batch_size = llm_config.get("batch_size", 5)
+    model = llm_config.get("model", "claude-sonnet-4-5-20250929")
 
     all_classifications: list[ClassificationResult] = []
 
-    # 규칙 매칭된 것은 JUNK로 직접 설정
     for msg in rule_matched:
         all_classifications.append(
             ClassificationResult(
@@ -123,20 +139,14 @@ def run(dry_run, verbose):
             )
         )
 
-    # 나머지는 배치로 Claude 분류
     for i in range(0, len(remaining), batch_size):
         batch = remaining[i : i + batch_size]
         if verbose:
             click.echo(f"       → 배치 {i // batch_size + 1}: {len(batch)}건 분류 중...")
-
-        results = classify_batch(
-            batch,
-            model=llm_config.get("model", "claude-sonnet-4-5-20250929"),
-            max_tokens=llm_config.get("max_tokens", 300) * len(batch),
-        )
+        results = classify_batch(batch, model=model, max_tokens=500 * len(batch))
         all_classifications.extend(results)
 
-    # 규칙 학습: JUNK 메일을 모아서 한 번에 통합 규칙 제안
+    # 규칙 학습
     junk_from_llm = [
         msg for msg in remaining
         for cls in all_classifications
@@ -144,25 +154,26 @@ def run(dry_run, verbose):
     ]
     if junk_from_llm:
         click.echo(f"       → JUNK {len(junk_from_llm)}건에서 규칙 학습 중...")
-        suggested = suggest_rules(
-            junk_from_llm,
-            model=llm_config.get("model", "claude-sonnet-4-5-20250929"),
-        )
+        suggested = suggest_rules(junk_from_llm, model=model)
         added = merge_rules(rules, suggested)
         if added and verbose:
             for r in added:
                 click.echo(f"       → 새 규칙: {r.get('sender', '')} {r.get('keywords', '')}")
-
     save_rules(rules)
 
     # 분류 결과 요약
     counts = {"JUNK": 0, "NEEDS_REPLY": 0, "STALE": 0, "NORMAL": 0}
+    reply_type_counts = {}
     for cls in all_classifications:
         counts[cls.classification] = counts.get(cls.classification, 0) + 1
-    click.echo(f"       → 분류 결과: {counts}")
+        if cls.reply_type:
+            reply_type_counts[cls.reply_type] = reply_type_counts.get(cls.reply_type, 0) + 1
+    click.echo(f"       → 분류: {counts}")
+    if reply_type_counts:
+        click.echo(f"       → 답장 유형: {reply_type_counts}")
 
-    # 5. 미답변 메일 우선순위화 + Google Tasks 투두
-    click.echo("[5/6] 미답변 메일 우선순위화 및 Tasks 투두 생성...")
+    # ── 5. 우선순위화 ──
+    click.echo("[5/8] 미답변 메일 우선순위화...")
     cal_config = settings.get("calendar", {})
     priority_config = settings.get("priority", {})
     customer_domains = settings.get("customer_domains", [])
@@ -175,30 +186,81 @@ def run(dry_run, verbose):
         max_results=cal_config.get("max_todos_per_run", 10),
     )
 
-    if prioritized:
-        if verbose:
-            click.echo("\n  투두 대상 메일:")
-            for p in prioritized:
-                customer_tag = "[고객]" if p.classification.is_customer else ""
-                click.echo(
-                    f"    #{p.rank} (점수: {p.score}) {customer_tag} "
-                    f"{p.message.subject[:50]} — {p.message.sender}"
-                )
-            click.echo()
+    if prioritized and verbose:
+        click.echo("\n  답신 대상 메일:")
+        for p in prioritized:
+            tag = REPLY_TYPE_LABELS.get(p.classification.reply_type or "", "")
+            customer_tag = "[고객]" if p.classification.is_customer else ""
+            click.echo(
+                f"    #{p.rank} {tag}{customer_tag} (점수:{p.score}) "
+                f"{p.message.subject[:40]} — {p.message.sender}"
+            )
+            if p.classification.reply_type == "DECISION" and p.classification.decision_options:
+                for j, opt in enumerate(p.classification.decision_options, 1):
+                    click.echo(f"       옵션{j}: {opt}")
+            if p.classification.reply_type == "INFO_SHARE" and p.classification.suggested_file:
+                click.echo(f"       파일: {p.classification.suggested_file}")
+        click.echo()
 
-        tasks = get_tasks_service()
-        created = create_todos(
-            tasks,
-            prioritized,
-            todo_prefix=cal_config.get("todo_prefix", "[메일투두]"),
+    # ── 6. 드래프트 생성 ──
+    click.echo("[6/8] Gmail 드래프트 생성 중...")
+    draft_results = []
+    if prioritized:
+        prioritized_msgs = [p.message for p in prioritized]
+        draft_results = compose_and_save_drafts(
+            gmail,
+            calendar,
+            prioritized_msgs,
+            all_classifications,
+            model=model,
             dry_run=dry_run,
         )
-        click.echo(f"       → Tasks 투두: {len(created)}건 {'(미리보기)' if dry_run else '생성됨'}")
-    else:
-        click.echo("       → 미답변 메일 없음")
 
-    # 6. JUNK 읽음 처리 + 재연락 리포트
-    click.echo("[6/6] JUNK 읽음 처리 및 재연락 리포트 생성...")
+        draft_count = len(draft_results)
+        click.echo(f"       → 드래프트: {draft_count}건 {'(미리보기)' if dry_run else '생성됨'}")
+        if verbose:
+            for d in draft_results:
+                tag = REPLY_TYPE_LABELS.get(d.get("reply_type", ""), "")
+                click.echo(f"       {tag} {d.get('subject', d.get('to', ''))}")
+    else:
+        click.echo("       → 드래프트 대상 없음")
+
+    # ── 7. Tasks 투두 + 긴급 캘린더 스케줄 ──
+    click.echo("[7/8] Tasks 투두 등록 및 긴급 스케줄 확인...")
+
+    if prioritized:
+        # Tasks 투두 생성 (reply_type별 요약 불릿 포함)
+        created_tasks = create_todos(
+            tasks,
+            prioritized,
+            classifications=all_classifications,
+            draft_results=draft_results,
+            dry_run=dry_run,
+        )
+        click.echo(f"       → Tasks: {len(created_tasks)}건 {'(미리보기)' if dry_run else '등록됨'}")
+
+        # 긴급 건 확인: 고객 + confidence 높은 건이 있으면 캘린더 블록
+        urgent = [
+            p for p in prioritized
+            if p.classification.is_customer and p.classification.confidence >= 0.8
+        ]
+        if urgent:
+            urgent_result = insert_urgent_schedule(
+                calendar,
+                subject=urgent[0].message.subject,
+                count=len(urgent),
+                dry_run=dry_run,
+            )
+            if urgent_result:
+                click.echo(
+                    f"       → 긴급 스케줄: {urgent_result['summary']} "
+                    f"{'(미리보기)' if dry_run else '삽입됨'}"
+                )
+    else:
+        click.echo("       → 투두 대상 없음")
+
+    # ── 8. JUNK 읽음 처리 + 재연락 리포트 ──
+    click.echo("[8/8] JUNK 읽음 처리 및 재연락 리포트 생성...")
 
     junk_msgs = [
         msg
@@ -207,10 +269,11 @@ def run(dry_run, verbose):
         if cls.message_id == msg.message_id and cls.classification == "JUNK"
     ]
     read_results = mark_as_read(gmail, junk_msgs, dry_run=dry_run)
-    unread_count = sum(1 for r in read_results if r["status"] in ("marked_read", "dry_run"))
+    unread_count = sum(
+        1 for r in read_results if r["status"] in ("marked_read", "dry_run")
+    )
     click.echo(f"       → 읽음 처리: {unread_count}건 {'(미리보기)' if dry_run else '완료'}")
 
-    # 재연락 리포트
     reengage_config = settings.get("reengage", {})
     report_path = generate_reengage_report(
         messages,
@@ -229,6 +292,8 @@ def run(dry_run, verbose):
         click.echo(f"누적 API 비용: ${summary['total_cost_usd']:.4f}")
 
 
+# ── rules 서브커맨드 ──
+
 @cli.group()
 def rules():
     """자동 읽음 규칙을 관리합니다."""
@@ -239,7 +304,6 @@ def rules():
 def rules_list():
     """현재 규칙 목록을 출력합니다."""
     all_rules = load_rules()
-
     if not all_rules:
         click.echo("등록된 규칙이 없습니다.")
         return
@@ -277,7 +341,6 @@ def rules_disable(index):
 def rules_stats():
     """규칙별 매칭 통계를 출력합니다."""
     stats = get_stats(load_rules())
-
     if not stats:
         click.echo("등록된 규칙이 없습니다.")
         return
@@ -297,7 +360,6 @@ def rules_stats():
 def cost():
     """API 비용 요약을 출력합니다."""
     summary = get_summary()
-
     if summary["total_calls"] == 0:
         click.echo("API 호출 기록이 없습니다.")
         return
