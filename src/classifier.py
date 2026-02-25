@@ -10,6 +10,7 @@
 """
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Optional
@@ -18,6 +19,8 @@ import anthropic
 
 from src.cost_tracker import record_usage
 from src.fetcher import EmailMessage
+
+logger = logging.getLogger(__name__)
 
 BATCH_PROMPT_HEADER = """이메일 {count}개 분류. JSON 배열만 반환.
 
@@ -115,29 +118,59 @@ def classify_batch(
     for msg in messages:
         prompt += _format_email_for_prompt(msg) + "\n---\n"
 
-    response = client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except anthropic.APIError as e:
+        logger.error("Claude API 호출 실패 (classify): %s", e)
+        return [
+            ClassificationResult(
+                message_id=m.message_id,
+                classification="NORMAL",
+                confidence=0.0,
+                reason="API 호출 실패",
+                is_customer=False,
+                has_direct_question=False,
+                has_schedule_request=False,
+            )
+            for m in messages
+        ]
 
-    usage = getattr(response, "usage", None)
-    if usage is not None:
+    # 비용 추적
+    if response.usage:
         record_usage(
             model=model,
-            input_tokens=getattr(usage, "input_tokens", 0) or 0,
-            output_tokens=getattr(usage, "output_tokens", 0) or 0,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
             operation="classify",
         )
 
+    # 안전한 응답 텍스트 추출
+    if not response.content or not hasattr(response.content[0], "text"):
+        logger.error("Claude API 빈 응답 (classify)")
+        return []
+
     response_text = response.content[0].text.strip()
+    if not response_text:
+        return []
 
     # JSON 파싱 (```json``` 블록이 있을 수 있으므로 정리)
     if response_text.startswith("```"):
         lines = response_text.split("\n")
-        response_text = "\n".join(lines[1:-1])
+        # 첫 줄(```json)과 마지막 줄(```) 제거
+        response_text = "\n".join(lines[1:-1]).strip()
+        if not response_text:
+            logger.error("마크다운 정리 후 빈 응답")
+            return []
 
-    parsed = json.loads(response_text)
+    try:
+        parsed = json.loads(response_text)
+    except json.JSONDecodeError as e:
+        logger.error("JSON 파싱 실패 (classify): %s\n응답: %s", e, response_text[:200])
+        return []
 
     if isinstance(parsed, dict):
         parsed = [parsed]
@@ -177,27 +210,44 @@ def suggest_rules(
 
     prompt = RULE_SUGGEST_PROMPT.format(max_rules=max_rules, junk_list=junk_list)
 
-    response = client.messages.create(
-        model=model,
-        max_tokens=512,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except anthropic.APIError as e:
+        logger.error("Claude API 호출 실패 (suggest_rules): %s", e)
+        return []
 
-    usage = getattr(response, "usage", None)
-    if usage is not None:
+    # 비용 추적
+    if response.usage:
         record_usage(
             model=model,
-            input_tokens=getattr(usage, "input_tokens", 0) or 0,
-            output_tokens=getattr(usage, "output_tokens", 0) or 0,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
             operation="rule_learn",
         )
 
+    if not response.content or not hasattr(response.content[0], "text"):
+        return []
+
     response_text = response.content[0].text.strip()
+    if not response_text:
+        return []
+
     if response_text.startswith("```"):
         lines = response_text.split("\n")
-        response_text = "\n".join(lines[1:-1])
+        response_text = "\n".join(lines[1:-1]).strip()
+        if not response_text:
+            return []
 
-    parsed = json.loads(response_text)
+    try:
+        parsed = json.loads(response_text)
+    except json.JSONDecodeError as e:
+        logger.error("JSON 파싱 실패 (suggest_rules): %s\n응답: %s", e, response_text[:200])
+        return []
+
     if isinstance(parsed, dict):
         parsed = [parsed]
 

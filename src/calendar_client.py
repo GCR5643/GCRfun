@@ -5,11 +5,14 @@
 """
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.classifier import ClassificationResult
 from src.prioritizer import PrioritizedEmail
+
+logger = logging.getLogger(__name__)
 
 TRACKING_FILE = "output/task_tracking.json"
 TASKLIST_TITLE = "메일 투두"
@@ -30,8 +33,12 @@ def _load_tracking() -> set[str]:
     p = Path(TRACKING_FILE)
     if not p.exists():
         return set()
-    data = json.loads(p.read_text())
-    return set(data.get("registered_ids", []))
+    try:
+        data = json.loads(p.read_text())
+        return set(data.get("registered_ids", []))
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("태스크 트래킹 파일 읽기 실패: %s", e)
+        return set()
 
 
 def _save_tracking(ids: set[str]) -> None:
@@ -160,19 +167,27 @@ def create_todos(
                 "reply_type": cls.reply_type,
             })
         else:
-            result = (
-                tasks_service.tasks()
-                .insert(tasklist=tasklist_id, body=task)
-                .execute()
-            )
-            tracking.add(email.message.message_id)
-            created.append({
-                "status": "created",
-                "title": task["title"],
-                "due": task["due"],
-                "task_id": result.get("id", ""),
-                "reply_type": cls.reply_type,
-            })
+            try:
+                result = (
+                    tasks_service.tasks()
+                    .insert(tasklist=tasklist_id, body=task)
+                    .execute()
+                )
+                tracking.add(email.message.message_id)
+                created.append({
+                    "status": "created",
+                    "title": task["title"],
+                    "due": task["due"],
+                    "task_id": result.get("id", ""),
+                    "reply_type": cls.reply_type,
+                })
+            except Exception as e:
+                logger.error("Tasks 등록 실패: %s (title=%s)", e, task["title"])
+                created.append({
+                    "status": "error",
+                    "title": task["title"],
+                    "error": str(e),
+                })
 
     if not dry_run:
         _save_tracking(tracking)
@@ -232,11 +247,20 @@ def insert_urgent_schedule(
             "start": start.isoformat(),
         }
 
-    result = (
-        calendar_service.events()
-        .insert(calendarId=calendar_id, body=event)
-        .execute()
-    )
+    try:
+        result = (
+            calendar_service.events()
+            .insert(calendarId=calendar_id, body=event)
+            .execute()
+        )
+    except Exception as e:
+        logger.error("캘린더 이벤트 삽입 실패: %s", e)
+        return {
+            "status": "error",
+            "summary": summary,
+            "error": str(e),
+        }
+
     return {
         "status": "created",
         "summary": summary,

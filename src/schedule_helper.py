@@ -9,10 +9,13 @@
   - 미팅 기본 길이: 60분
 """
 
+import logging
 from datetime import datetime, timedelta, timezone, time
 from dataclasses import dataclass
 
 from dateutil import parser as date_parser
+
+logger = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
 
@@ -45,7 +48,11 @@ def get_busy_slots(
         "items": [{"id": calendar_id}],
     }
 
-    result = calendar_service.freebusy().query(body=body).execute()
+    try:
+        result = calendar_service.freebusy().query(body=body).execute()
+    except Exception as e:
+        logger.error("캘린더 freebusy 조회 실패: %s", e)
+        return []
     busy_list = result.get("calendars", {}).get(calendar_id, {}).get("busy", [])
 
     slots = []

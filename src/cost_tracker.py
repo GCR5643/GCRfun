@@ -27,7 +27,10 @@ def _load_log() -> list[dict]:
     p = Path(COST_LOG_FILE)
     if not p.exists():
         return []
-    return json.loads(p.read_text())
+    try:
+        return json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
 
 
 def _save_log(entries: list[dict]) -> None:

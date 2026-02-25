@@ -205,10 +205,11 @@ def run(dry_run, verbose):
         all_classifications.extend(results)
 
     # 규칙 학습
+    cls_map = {c.message_id: c for c in all_classifications}
     junk_from_llm = [
         msg for msg in remaining
-        for cls in all_classifications
-        if cls.message_id == msg.message_id and cls.classification == "JUNK"
+        if cls_map.get(msg.message_id, None)
+        and cls_map[msg.message_id].classification == "JUNK"
     ]
     if junk_from_llm:
         click.echo(f"       → JUNK {len(junk_from_llm)}건에서 규칙 학습 중...")
@@ -322,10 +323,9 @@ def run(dry_run, verbose):
     click.echo("[8/8] JUNK 읽음 처리 및 재연락 리포트 생성...")
 
     junk_msgs = [
-        msg
-        for msg in messages
-        for cls in all_classifications
-        if cls.message_id == msg.message_id and cls.classification == "JUNK"
+        msg for msg in messages
+        if cls_map.get(msg.message_id, None)
+        and cls_map[msg.message_id].classification == "JUNK"
     ]
     read_results = mark_as_read(gmail, junk_msgs, dry_run=dry_run)
     unread_count = sum(

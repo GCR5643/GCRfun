@@ -5,11 +5,14 @@
 - STALE → 재연락 리포트 생성
 """
 
+import logging
 from datetime import datetime
 from pathlib import Path
 
 from src.classifier import ClassificationResult
 from src.fetcher import EmailMessage
+
+logger = logging.getLogger(__name__)
 
 
 def mark_as_read(
@@ -43,19 +46,29 @@ def mark_as_read(
                 }
             )
         else:
-            gmail_service.users().messages().modify(
-                userId="me",
-                id=msg.message_id,
-                body={"removeLabelIds": ["UNREAD"]},
-            ).execute()
-            results.append(
-                {
-                    "status": "marked_read",
-                    "message_id": msg.message_id,
-                    "subject": msg.subject,
-                    "sender": msg.sender,
-                }
-            )
+            try:
+                gmail_service.users().messages().modify(
+                    userId="me",
+                    id=msg.message_id,
+                    body={"removeLabelIds": ["UNREAD"]},
+                ).execute()
+                results.append(
+                    {
+                        "status": "marked_read",
+                        "message_id": msg.message_id,
+                        "subject": msg.subject,
+                        "sender": msg.sender,
+                    }
+                )
+            except Exception as e:
+                logger.error("읽음 처리 실패: %s (id=%s)", e, msg.message_id)
+                results.append(
+                    {
+                        "status": "error",
+                        "message_id": msg.message_id,
+                        "error": str(e),
+                    }
+                )
 
     return results
 

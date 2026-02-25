@@ -8,6 +8,7 @@ Gmail 드래프트로 저장합니다. (스레드에 이어서)
 
 import base64
 import json
+import logging
 import os
 from email.mime.text import MIMEText
 
@@ -16,6 +17,8 @@ import anthropic
 from src.classifier import ClassificationResult
 from src.cost_tracker import record_usage
 from src.fetcher import EmailMessage
+
+logger = logging.getLogger(__name__)
 
 # reply_type별 한국어 라벨
 REPLY_TYPE_LABELS = {
@@ -130,11 +133,27 @@ def generate_draft_text(
 
     prompt = _build_draft_prompt(msg, cls, schedule_context)
 
-    response = client.messages.create(
-        model=model,
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except anthropic.APIError as e:
+        logger.error("Claude API 호출 실패 (draft): %s", e)
+        return f"[드래프트 자동 생성 실패 — 수동 작성 필요]\n원본: {msg.subject}"
+
+    # 비용 추적
+    if response.usage:
+        record_usage(
+            model=model,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            operation="draft",
+        )
+
+    if not response.content or not hasattr(response.content[0], "text"):
+        return f"[드래프트 자동 생성 실패 — 빈 응답]\n원본: {msg.subject}"
 
     usage = getattr(response, "usage", None)
     if usage is not None:
@@ -187,20 +206,30 @@ def create_gmail_draft(
 
     raw = base64.urlsafe_b64encode(mime_msg.as_bytes()).decode("utf-8")
 
-    draft = (
-        gmail_service.users()
-        .drafts()
-        .create(
-            userId="me",
-            body={
-                "message": {
-                    "raw": raw,
-                    "threadId": msg.thread_id,
-                }
-            },
+    try:
+        draft = (
+            gmail_service.users()
+            .drafts()
+            .create(
+                userId="me",
+                body={
+                    "message": {
+                        "raw": raw,
+                        "threadId": msg.thread_id,
+                    }
+                },
+            )
+            .execute()
         )
-        .execute()
-    )
+    except Exception as e:
+        logger.error("Gmail 드래프트 생성 실패: %s (subject=%s)", e, msg.subject)
+        return {
+            "status": "error",
+            "thread_id": msg.thread_id,
+            "to": msg.sender,
+            "subject": mime_msg["Subject"],
+            "error": str(e),
+        }
 
     return {
         "status": "created",
